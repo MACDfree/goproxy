@@ -17,6 +17,7 @@ import (
 func NewResponse(r *http.Request, contentType string, status int, body string) *http.Response {
 	resp := &http.Response{}
 	resp.Request = r
+	resp.Proto = "HTTP/1.1"
 	resp.TransferEncoding = r.TransferEncoding
 	resp.Header = make(http.Header)
 	resp.Header.Add("Content-Type", contentType)

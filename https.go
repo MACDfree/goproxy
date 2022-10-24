@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 )
 
@@ -141,15 +140,31 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 			go copyAndClose(ctx, targetTCP, proxyClientTCP)
 			go copyAndClose(ctx, proxyClientTCP, targetTCP)
 		} else {
+			// There is a race with the runtime here. In the case where the
+			// connection to the target site times out, we cannot control which
+			// io.Copy loop will receive the timeout signal first. This means
+			// that in some cases the error passed to the ConnErrorHandler will
+			// be the timeout error, and in other cases it will be an error raised
+			// by the use of a closed network connection.
+			//
+			// 2020/05/28 23:42:17 [001] WARN: Error copying to client: read tcp 127.0.0.1:33742->127.0.0.1:34763: i/o timeout
+			// 2020/05/28 23:42:17 [001] WARN: Error copying to client: read tcp 127.0.0.1:45145->127.0.0.1:60494: use of closed network connection
+			//
+			// It's also not possible to synchronize these connection closures due to
+			// TCP connections which are half-closed. When this happens, only the one
+			// side of the connection breaks out of its io.Copy loop. The other side
+			// of the connection remains open until it either times out or is reset by
+			// the client.
 			go func() {
-				var wg sync.WaitGroup
-				wg.Add(2)
-				go copyOrWarn(ctx, targetSiteCon, proxyClient, &wg)
-				go copyOrWarn(ctx, proxyClient, targetSiteCon, &wg)
-				wg.Wait()
-				proxyClient.Close()
+				err := copyOrWarn(ctx, targetSiteCon, proxyClient)
+				if err != nil && !isClosedNetworkConnError(err) {
+					ctx.Logf("%v", err)
+				}
 				targetSiteCon.Close()
-
+			}()
+			go func() {
+				copyOrWarn(ctx, proxyClient, targetSiteCon)
+				proxyClient.Close()
 			}()
 		}
 
@@ -332,11 +347,18 @@ func httpError(w io.WriteCloser, ctx *ProxyCtx, err error) {
 	}
 }
 
-func copyOrWarn(ctx *ProxyCtx, dst io.Writer, src io.Reader, wg *sync.WaitGroup) {
-	if _, err := io.Copy(dst, src); err != nil {
+// isClosedNetworkConnError returns true if the error contains the suffix "use of closed network connection".
+// This isn't ideal, and in Go 1.16 we will be able to check for net.ErrClosed.
+func isClosedNetworkConnError(err error) bool {
+	return strings.HasSuffix(err.Error(), "use of closed network connection")
+}
+
+func copyOrWarn(ctx *ProxyCtx, dst io.Writer, src io.Reader) error {
+	_, err := io.Copy(dst, src)
+	if err != nil && !isClosedNetworkConnError(err) {
 		ctx.Warnf("Error copying to client: %s", err)
 	}
-	wg.Done()
+	return err
 }
 
 func copyAndClose(ctx *ProxyCtx, dst, src halfClosable) {
