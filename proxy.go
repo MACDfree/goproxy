@@ -137,7 +137,8 @@ func (proxy *ProxyHttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			proxy.NonproxyHandler.ServeHTTP(w, r)
 			return
 		}
-		if strings.EqualFold(r.Method, "CGET") {
+		orgMethod := strings.ToUpper(r.Method)
+		if strings.HasSuffix(orgMethod, "GET") {
 			r.Method = "GET"
 		}
 		r, resp := proxy.filterRequest(r, ctx)
